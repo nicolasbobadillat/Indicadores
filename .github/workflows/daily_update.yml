@@ -1,0 +1,54 @@
+name: Market Guardian Auto-Update
+
+# 1. ¿CUÁNDO SE EJECUTA?
+on:
+  schedule:
+    # Corre todos los días a las 23:00 UTC (Cierre de mercado NY + buffer)
+    - cron: '0 23 * * *'
+  workflow_dispatch: # Permite darle click al botón "Run" manual para probar
+
+# 2. PERMISOS PARA GUARDAR CAMBIOS
+permissions:
+  contents: write
+
+# 3. EL TRABAJO
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      # A. Bajar tu código
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # B. Instalar Java (Requerido para Spark)
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      # C. Instalar Python
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      # D. Instalar Librerías
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # E. EJECUTAR EL ETL (Aquí ocurre la magia)
+      - name: Run PySpark ETL
+        run: python src/etl_spark.py
+
+      # F. Guardar los CSV nuevos en el Repo
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name 'MarketBot'
+          git config --global user.email 'bot@marketguardian.com'
+          git add data_kpi.csv data_history.csv data_macro.csv
+          # Solo hace commit si hay cambios reales
+          git commit -m "📈 Auto-update: Datos financieros diarios" || exit 0
+          git push
