@@ -24,8 +24,7 @@ from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 # 1. CONFIGURACIÓN Y CONSTANTES
 # ==========================================
 
-# Configuración de fallback para APIs (Entorno de Desarrollo vs Producción)
-DEFAULT_API_KEY = "c5f1fefbc9mshee2eb77c59a5aeap10950bjsn3bedb5eaf84b"
+
 
 # Universo de Activos a Monitorear
 TARGET_TICKERS = [
