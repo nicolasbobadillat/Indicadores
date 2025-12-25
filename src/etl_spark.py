@@ -1,268 +1,377 @@
-import yfinance as yf
-import pandas as pd
+
+"""ETL Pipeline - Terminal Inversionista 
+-----------------------------------------------------------
+
+Descripción:
+    Pipeline híbrido de extracción y transformación de datos financieros.
+    1. EXTRACT: Usa yfinance (API) para datos de mercado y fundamentales.
+    2. TRANSFORM: Usa PySpark para imponer esquemas estrictos y calcular columnas derivadas.
+    3. LOAD: Publica archivos CSV estáticos (Patrón Data Lake) para consumo del Frontend.
+
+Tecnologías: Python, Pandas, PySpark, Yahoo Finance API.
+"""
+
+import os
 import requests
-import numpy as np
+import pandas as pd
+import yfinance as yf
 from datetime import datetime
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 
-def init_spark():
-    return SparkSession.builder.appName("MarketGuardian_V60_FinalData").master("local[*]").getOrCreate()
+# ==========================================
+# 1. CONFIGURACIÓN Y CONSTANTES
+# ==========================================
 
-def get_macro_real():
-    print("🌍 Descargando Macro Data (Híbrido: Mindicador + Yahoo + RapidAPI)...")
+# Configuración de fallback para APIs (Entorno de Desarrollo vs Producción)
+DEFAULT_API_KEY = "c5f1fefbc9mshee2eb77c59a5aeap10950bjsn3bedb5eaf84b"
+
+# Universo de Activos a Monitorear
+TARGET_TICKERS = [
+    #TOP
+    'NVDA', 'GOOGL','PLTR','SOFI',
+    # Índices & Macro
+    '^GSPC','^IPSA', '^NDX', '^DJI',
+    # Magnificent 7 (Tech)
+    'AAPL', 'MSFT','AMZN', 'META', 'TSLA', 'AMD',
+    # Chile Blue Chips
+    'BCI.SN', 'BSANTANDER.SN', 'CHILE.SN','ITAUCL.SN', 'COPEC.SN',
+    'CENCOSUD.SN', 'FALABELLA.SN', 'SQM-B.SN','BICE.SN', 
+    # Financials & Defensive
+    'JPM', 'BAC', 'KO', 'PEP', 'MCD', 'WMT',
+    # Commodities & Crypto
+    'BTC-USD', 'ETH-USD'
+]
+
+MACRO_INDICATORS = {
+    'S&P500': '^GSPC', 'NASDAQ': '^NDX', 'IPSA': '^IPSA', 
+    'BTC': 'BTC-USD', 'VIX': '^VIX', 'ORO': 'GC=F', 
+    'DOW': '^DJI', 'COBRE': 'HG=F'
+}
+
+TICKER_MAPPING = {
+    '^GSPC': 'S&P 500',
+    '^NDX':  'Nasdaq 100',
+    '^DJI':  'Dow Jones',
+    'BTC-USD': 'BTC',
+    'ETH-USD': 'ETH'
+}
+
+# ==========================================
+# 2. INICIALIZACIÓN DE SPARK
+# ==========================================
+
+def init_spark() -> SparkSession:
+    """
+    Inicializa la sesión de Spark con optimización Arrow habilitada.
+    
+    Returns:
+        SparkSession: Objeto de sesión configurado para procesamiento local.
+    """
+    return SparkSession.builder \
+        .appName("MarketGuardian_ETL_Institutional") \
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+        .master("local[*]") \
+        .getOrCreate()
+
+def get_api_key() -> str:
+    """Recupera la API Key de variables de entorno o usa fallback."""
+    key = os.environ.get('RAPIDAPI_KEY')
+    if not key:
+        print("⚠️ AVISO: Usando API Key de respaldo (Entorno Local).")
+        return DEFAULT_API_KEY
+    return key
+
+# ==========================================
+# 3. CAPA DE EXTRACCIÓN (EXTRACT)
+# ==========================================
+
+def get_macro_data(api_key: str) -> list:
+    """
+    Extrae indicadores macroeconómicos globales y locales (Chile).
+    Usa 'Fast Info' de Yahoo para reducir latencia en tiempo real.
+
+    Args:
+        api_key (str): Key para la API de Fear & Greed Index.
+
+    Returns:
+        list: Lista de diccionarios con {Indicador, Valor, Variacion}.
+    """
+    print("🌍 Extrayendo Datos Macro (Strategy: Fast Info + API Mindicador)...")
     data = []
 
-    # 1. API MINDICADOR.CL (Chile Oficial)
-    try:
-        resp_cl = requests.get('https://mindicador.cl/api').json()
+    # A. API MINDICADOR (Datos Chile)
+    local_indicators = {'USD': 'dolar', 'UF': 'uf', 'EUR': 'euro'}
+    for ind_name, ind_code in local_indicators.items():
+        try:
+            resp = requests.get(f'https://mindicador.cl/api/{ind_code}', timeout=5).json()
+            serie = resp.get('serie', [])
+            if len(serie) >= 2:
+                curr_val = float(serie[0]['valor'])
+                prev_val = float(serie[1]['valor'])
+                var = ((curr_val - prev_val) / prev_val) * 100
+            else:
+                curr_val = float(serie[0]['valor']) if serie else 0.0
+                var = 0.0
+            data.append({'Indicador': ind_name, 'Valor': curr_val, 'Variacion': var})
+        except Exception:
+            # Fallback seguro visual
+            safe_val = 980.0 if ind_name == 'USD' else 37000.0
+            data.append({'Indicador': ind_name, 'Valor': safe_val, 'Variacion': 0.0})
 
-        # USD
-        usd_val = float(resp_cl['dolar']['valor'])
-        # Calculamos variación simulada o 0.0 si la API no la entrega directo
-        data.append({'Indicador': 'USD', 'Valor': usd_val, 'Variacion': 0.0})
-
-        # UF
-        uf_val = float(resp_cl['uf']['valor'])
-        data.append({'Indicador': 'UF', 'Valor': uf_val, 'Variacion': 0.0})
-    except Exception as e:
-        print(f"⚠️ Error Mindicador: {e}")
-        data.append({'Indicador': 'USD', 'Valor': 980.0, 'Variacion': 0.0})
-        data.append({'Indicador': 'UF', 'Valor': 36900.0, 'Variacion': 0.0})
-
-    # 2. API FEAR & GREED (RapidAPI)
+    # B. API FEAR & GREED (Sentimiento de Mercado)
     try:
         url = "https://fear-and-greed-index.p.rapidapi.com/v1/fgi"
-        headers = {
-            "x-rapidapi-key": "c5f1fefbc9mshee2eb77c59a5aeap10950bjsn3bedb5eaf84b", # <--- PEGA TU API KEY AQUÍ
-            "x-rapidapi-host": "fear-and-greed-index.p.rapidapi.com"
-        }
-        resp_fgi = requests.get(url, headers=headers).json()
-
-        # Estructura usual: {'fgi': {'now': {'value': 50, 'valueText': 'Neutral'}}}
+        headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": "fear-and-greed-index.p.rapidapi.com"}
+        resp_fgi = requests.get(url, headers=headers, timeout=5).json()
         fgi_val = float(resp_fgi['fgi']['now']['value'])
         data.append({'Indicador': 'F&G Index', 'Valor': fgi_val, 'Variacion': 0.0})
-    except Exception as e:
-        print(f"⚠️ Error Fear&Greed: {e}")
+    except Exception:
         data.append({'Indicador': 'F&G Index', 'Valor': 50.0, 'Variacion': 0.0})
 
-    # 3. YAHOO FINANCE (Resto del Mundo)
-    tickers = {
-        'S&P500': '^GSPC', 'NASDAQ': '^NDX', 'DOW': '^DJI',
-        'IPSA': '^IPSA', 'BTC': 'BTC-USD', 'VIX': '^VIX', 'GOLD': 'GC=F'
-    }
-
-    for name, sym in tickers.items():
+    # C. YAHOO FINANCE (Global Markets)
+    for name, sym in MACRO_INDICATORS.items():
         try:
-            hist = yf.Ticker(sym).history(period="2d")
-            if len(hist) > 1:
-                val = float(hist['Close'].iloc[-1])
-                prev = float(hist['Close'].iloc[-2])
-                var = ((val - prev) / prev) * 100
-            else:
-                val = float(hist['Close'].iloc[-1])
-                var = 0.0
+            ticker = yf.Ticker(sym)
+            val, var = 0.0, 0.0
+            use_history = (name == 'BTC') # Crypto requiere historial por volatilidad
+
+            # Intento 1: Fast Info (Menor Latencia)
+            if not use_history:
+                try:
+                    fast = ticker.fast_info
+                    last_price = fast.last_price
+                    prev_close = fast.regular_market_previous_close
+                    if last_price and prev_close:
+                        val = float(last_price)
+                        var = ((last_price - prev_close) / prev_close) * 100
+                    else:
+                        use_history = True
+                except:
+                    use_history = True
+
+            # Intento 2: Histórico (Fallback o BTC)
+            if use_history:
+                hist = ticker.history(period="5d")
+                
+                # Lógica Proxy para IPSA (Si Yahoo falla con el índice local, usamos el ETF ECH)
+                if name == 'IPSA' and (hist.empty or len(hist) < 2 or hist['Close'].iloc[-1] == 0):
+                    print("   ⚠️ IPSA sin data, activando proxy ECH...")
+                    try:
+                        proxy = yf.Ticker("ECH").history(period="5d")
+                        if len(proxy) >= 2:
+                            var = ((proxy['Close'].iloc[-1] - proxy['Close'].iloc[-2]) / proxy['Close'].iloc[-2]) * 100
+                            val = 6500.0 # Referencia visual estática
+                    except: pass
+                elif len(hist) >= 2:
+                    val = float(hist['Close'].iloc[-1])
+                    prev = float(hist['Close'].iloc[-2])
+                    var = ((val - prev) / prev) * 100
+
             data.append({'Indicador': name, 'Valor': val, 'Variacion': var})
-        except:
+
+        except Exception as e:
+            print(f"Error en {name}: {e}")
             data.append({'Indicador': name, 'Valor': 0.0, 'Variacion': 0.0})
 
-    return pd.DataFrame(data)
+    return data
 
-def smart_download(ticker):
-    stock = yf.Ticker(ticker)
-    try: hist = stock.history(period="2y", auto_adjust=True)
-    except: hist = pd.DataFrame()
+def get_financial_data(tickers: list) -> tuple:
+    """
+    Descarga datos fundamentales y series de tiempo corregidas.
+    
+    Technical Debt Note:
+        Yahoo Finance a veces entrega datos históricos '2y' con 1 día de retraso (lag).
+        Para solucionar esto, implementamos un 'Freshness Patch' que consulta 
+        '5d' y sobrescribe el último registro de cierre para garantizar tiempo real.
 
-    # PROXY FIX (IPSA)
-    if (hist.empty or len(hist) < 10) and ("IPSA" in ticker):
-        print(f"⚠️ Usando Proxy ECH para {ticker}...")
-        try:
-            proxy = yf.Ticker("ECH")
-            hist_proxy = proxy.history(period="2y", auto_adjust=True)
-            if not hist_proxy.empty:
-                factor = 10223.0 / hist_proxy['Close'].iloc[-1]
-                hist = hist_proxy.copy()
-                hist['Close'] = hist['Close'] * factor
-                hist['Open'] = hist['Open'] * factor
-                hist['High'] = hist['High'] * factor
-                hist['Low'] = hist['Low'] * factor
-        except: pass
-    return stock, hist
+    Args:
+        tickers (list): Lista de símbolos.
 
-def get_data_institutional(tickers):
-    snapshot_data = []
-    history_data = []
-
-    print("🚀 Iniciando Extracción Final (Data Repair)...")
+    Returns:
+        tuple: (snapshot_list, history_list)
+    """
+    print("🏢 Extrayendo Datos Financieros (Batch Processing)...")
+    snapshot = []
+    history = []
 
     for t in tickers:
         try:
-            print(f"Analizando: {t}...")
-            stock, hist_2y = smart_download(t)
+            clean_name = TICKER_MAPPING.get(t, t)
 
-            if hist_2y.empty: continue
+            print(f"   -> Procesando {t}...")
+            stock = yf.Ticker(t)
 
-            # 1. HISTORIA
-            hist_2y.index = pd.to_datetime(hist_2y.index).tz_localize(None)
-            hist_2y['SMA_20'] = hist_2y['Close'].rolling(window=20).mean()
-            hist_2y['SMA_50'] = hist_2y['Close'].rolling(window=50).mean()
-            hist_2y['SMA_200'] = hist_2y['Close'].rolling(window=200).mean()
+            # 1. Historia Base (2 Años para análisis técnico)
+            hist = stock.history(period="2y", auto_adjust=True)
 
-            hist_1y = hist_2y.iloc[-252:].copy()
+            # Proxy Fix para IPSA local si falla la descarga principal
+            if (hist.empty or len(hist) < 10) and "IPSA" in t:
+                try:
+                    proxy = yf.Ticker("ECH").history(period="2y", auto_adjust=True)
+                    if not proxy.empty:
+                        # Ajuste de escala aproximado (Factor de conversión)
+                        factor = 10223.0 / proxy['Close'].iloc[-1]
+                        hist = proxy * factor
+                except: pass
 
-            df_p = hist_1y[['Close', 'SMA_20', 'SMA_50', 'SMA_200']].reset_index()
-            df_p.columns = ['Date', 'Close', 'SMA_20', 'SMA_50', 'SMA_200']
-            df_p['Ticker'] = t
-            df_p['Date'] = df_p['Date'].dt.strftime('%Y-%m-%d')
-            df_p['Type'] = 'Price'
-            df_p['Metric_Revenue'] = 0.0
-            df_p['Metric_NetIncome'] = 0.0
-            history_data.extend(df_p.to_dict('records'))
+            if hist.empty: continue
 
-            # 2. FUNDAMENTALES (FIX)
-            try: info = stock.info
-            except: info = {}
-
-            precio = hist_1y['Close'].iloc[-1]
-
-            # Performance
+            # --- FRESHNESS PATCH (Corrección de Lag) ---
             try:
-                p_1y = hist_2y['Close'].iloc[-252]
-                perf_1y = ((precio - p_1y)/p_1y)*100
-                y_start = pd.Timestamp(datetime.now().year, 1, 1)
-                h_ytd = hist_2y[hist_2y.index >= y_start]
-                perf_ytd = ((precio - h_ytd.iloc[0]['Close'])/h_ytd.iloc[0]['Close'])*100 if not h_ytd.empty else 0
-            except: perf_1y, perf_ytd = 0.0, 0.0
+                fresh_hist = stock.history(period="5d", auto_adjust=True)
+                if not fresh_hist.empty:
+                    real_close = float(fresh_hist['Close'].iloc[-1])
+                    long_close = float(hist['Close'].iloc[-1])
+                    
+                    # Si hay discrepancia significativa, forzamos el valor real
+                    if abs(real_close - long_close) > 0.01:
+                        hist.iloc[-1, hist.columns.get_loc('Close')] = real_close
+            except Exception:
+                pass # Si falla el patch, degradamos suavemente a la data histórica
+            # -------------------------------------------
 
-            is_index = t.startswith('^') or 'BTC' in t or 'IPSA' in t
+            # Preparación para Spark (Flattening)
+            hist_reset = hist.reset_index()
+            hist_reset['Date'] = hist_reset['Date'].dt.strftime('%Y-%m-%d')
+            hist_reset['Ticker'] = clean_name
+            hist_reset['Type'] = 'Price'
+            
+            # Cálculo de Medias Móviles (Technical Indicators)
+            hist_reset['SMA_20'] = hist_reset['Close'].rolling(20).mean().fillna(0)
+            hist_reset['SMA_50'] = hist_reset['Close'].rolling(50).mean().fillna(0)
+            hist_reset['SMA_200'] = hist_reset['Close'].rolling(200).mean().fillna(0)
 
-            # VALORES SEGUROS
-            rev, net, ebitda = 0, 0, 0
-            pe, peg, beta, quick = 0, 0, 1.0, 0
-            curr_assets, curr_liab = 0, 1
-            roe = 0
+            # Columnas dummy para mantener esquema consistente con registros financieros
+            hist_reset['Metric_Revenue'] = 0.0
+            hist_reset['Metric_NetIncome'] = 0.0
 
-            if not is_index:
-                # Extraccion Info
-                rev = info.get('totalRevenue', 0)
-                net = info.get('netIncomeToCommon', 0)
-                ebitda = info.get('ebitda', 0)
-                pe = info.get('trailingPE', 0)
+            # Seleccionamos columnas finales y convertimos a dict
+            hist_final = hist_reset.tail(252)[
+                ['Ticker', 'Date', 'Type', 'Close', 'SMA_20', 'SMA_50', 'SMA_200', 'Metric_Revenue', 'Metric_NetIncome']
+            ]
+            history.extend(hist_final.to_dict('records'))
 
-                # FIX PEG
-                peg = info.get('pegRatio')
-                if peg is None: peg = info.get('trailingPegRatio', 0)
+            # 2. Snapshot de Datos Fundamentales (KPIs actuales)
+            info = stock.info
+            price = float(hist['Close'].iloc[-1]) # Usamos el precio corregido
+            p_1y = hist['Close'].iloc[-252] if len(hist) > 252 else price
+            
+            # Cálculo de Ratios de Liquidez (Fallback logic)
+            c_liab = info.get('totalCurrentLiabilities') or info.get('currentLiabilities') or 1
+            c_assets = info.get('totalCurrentAssets') or info.get('currentAssets')
+            if not c_assets and info.get('currentRatio'):
+                c_assets = float(info['currentRatio']) * c_liab
+            elif not c_assets:
+                c_assets = 0
 
-                # FIX QUICK RATIO
-                quick = info.get('quickRatio')
-
-                # FIX ROE (Priorizar dato ya calculado)
-                roe = info.get('returnOnEquity', 0) * 100
-
-                # Fallbacks manuales si info falla
-                inc = stock.income_stmt
-                bs = stock.balance_sheet
-
-                def gv(df, k):
-                    if df is None or df.empty: return 0
-                    for x in k:
-                        if x in df.index: return float(df.loc[x].iloc[0])
-                    return 0
-
-                if rev == 0: rev = gv(inc, ['Total Revenue', 'Revenue'])
-                if net == 0: net = gv(inc, ['Net Income'])
-                if ebitda == 0: ebitda = gv(inc, ['Normalized EBITDA', 'EBITDA'])
-
-                curr_assets = gv(bs, ['Current Assets'])
-                curr_liab = gv(bs, ['Current Liabilities'])
-                inventory = gv(bs, ['Inventory', 'Inventories'])
-                equity = gv(bs, ['Stockholders Equity'])
-
-                # Calculos manuales de rescate
-                if quick is None and curr_liab > 0:
-                    quick = (curr_assets - inventory) / curr_liab
-                if roe == 0 and equity > 0:
-                    roe = (net / equity) * 100
-                if pe == 0 and net > 0:
-                    # PE estimado
-                    shares = info.get('sharesOutstanding', 1)
-                    eps = net / shares
-                    if eps > 0: pe = precio / eps
-
-            # Clean Final Values
-            if peg is None: peg = 0
-            if quick is None: quick = 0
-
-            # 52W Range
-            h52 = info.get('fiftyTwoWeekHigh', hist_1y['Close'].max())
-            l52 = info.get('fiftyTwoWeekLow', hist_1y['Close'].min())
-
-            # Dividend
-            div_yield = info.get('dividendYield')
-            if div_yield is None:
-                dr = info.get('dividendRate')
-                div_yield = (dr/precio) if (dr and precio) else 0.0
-            if div_yield > 0.20: div_yield /= 100
-
-            # Score
-            rec_mean = info.get('recommendationMean')
-            score = (6.0 - rec_mean) if rec_mean else 3.0
-
-            snapshot_data.append({
-                "Ticker": t, "Precio": precio,
-                "Sector": info.get('sector', 'Index/Fund'), "Industria": info.get('industry', 'Market'),
-                "Beta": info.get('beta', 1.0), "PE_Ratio": pe, "PEG_Ratio": peg, "Quick_Ratio": quick,
-                "Target_Price": info.get('targetMeanPrice', precio), "Recommendation": info.get('recommendationKey','none'),
-                "Consensus_Score": score, "Num_Analysts": info.get('numberOfAnalystOpinions',0),
-                "Dividend_Yield": div_yield,
-                "52W_High": float(h52), "52W_Low": float(l52),
-                "Perf_YTD": perf_ytd, "Perf_1Y": perf_1y,
-                "Ventas": rev, "EBITDA": ebitda, "Utilidad_Neta": net,
-                "Activo_Cte": curr_assets, "Pasivo_Cte": curr_liab, "Patrimonio": 0,
-                "ROE": roe, "Costo_Ventas": gv(inc, ['Cost Of Revenue']), "OpEx": gv(inc, ['Operating Expense'])
+            # Construcción del diccionario de KPIs
+            snapshot.append({
+                "Ticker": clean_name,
+                "Precio": price,
+                "Sector": info.get('sector', 'Index/Fund'),
+                "Beta": float(info.get('beta', 1.0) or 1.0),
+                "PE_Ratio": float(info.get('trailingPE', 0) or 0),
+                "PEG_Ratio": float(info.get('trailingPegRatio', 0) or 0),
+                "Quick_Ratio": float(info.get('quickRatio', 0) or 0),
+                "Target_Price": float(info.get('targetMeanPrice', price) or price),
+                "Consensus_Score": float(6.0 - (info.get('recommendationMean') or 3.0)), # Inversión de escala 1-5
+                "Num_Analysts": int(info.get('numberOfAnalystOpinions', 0) or 0),
+                "Dividend_Yield": float(info.get('dividendYield', 0) or 0),
+                "52W_High": float(info.get('fiftyTwoWeekHigh', price)),
+                "52W_Low": float(info.get('fiftyTwoWeekLow', price)),
+                "Perf_YTD": float(((price - hist[hist.index >= f"{datetime.now().year}-01-01"].iloc[0]['Close']) / hist[hist.index >= f"{datetime.now().year}-01-01"].iloc[0]['Close'] * 100) if not hist[hist.index >= f"{datetime.now().year}-01-01"].empty else 0),
+                "Perf_1Y": float(((price - p_1y)/p_1y)*100),
+                "Ventas": float(info.get('totalRevenue', 0) or 0),
+                "EBITDA": float(info.get('ebitda', 0) or 0),
+                "Utilidad_Neta": float(info.get('netIncomeToCommon', 0) or 0),
+                "Activo_Cte": float(c_assets),
+                "Pasivo_Cte": float(c_liab),
+                "ROE": float((info.get('returnOnEquity', 0) or 0) * 100),
+                # Estimaciones simples para P&L Waterfall
+                "Costo_Ventas": float((info.get('totalRevenue', 0) or 0) * 0.6),
+                "OpEx": float((info.get('totalRevenue', 0) or 0) * 0.2)
             })
 
-            # Historia Financiera (Para gráficos)
+            # 3. Historia Financiera (Solo si no es índice)
+            is_index = t.startswith('^') or 'BTC' in t or 'IPSA' in t
             if not is_index:
-                inc = stock.income_stmt if not stock.income_stmt.empty else stock.financials
-                if not inc.empty:
-                    for i in range(min(3, len(inc.columns))):
-                        d = str(inc.columns[i].year) if hasattr(inc.columns[i], 'year') else str(inc.columns[i])[:4]
-                        history_data.append({
-                            'Ticker': t, 'Date': d, 'Type': 'Financials',
-                            'Metric_Revenue': gv(inc.iloc[:, [i]], ['Total Revenue', 'Revenue']),
-                            'Metric_NetIncome': gv(inc.iloc[:, [i]], ['Net Income']),
-                            'Close':0, 'SMA_20':0, 'SMA_50':0, 'SMA_200':0
-                        })
+                fin_stmt = stock.financials
+                if not fin_stmt.empty:
+                    for date_idx in fin_stmt.columns[:3]: # Últimos 3 periodos
+                        try:
+                            rev = float(fin_stmt.loc['Total Revenue', date_idx]) if 'Total Revenue' in fin_stmt.index else 0.0
+                            net = float(fin_stmt.loc['Net Income', date_idx]) if 'Net Income' in fin_stmt.index else 0.0
+                            history.append({
+                                'Ticker': clean_name, 'Date': date_idx.strftime('%Y-%m-%d'), 'Type': 'Financials',
+                                'Close': 0.0, 'SMA_20': 0.0, 'SMA_50': 0.0, 'SMA_200': 0.0,
+                                'Metric_Revenue': rev, 'Metric_NetIncome': net
+                            })
+                        except: pass
 
         except Exception as e:
-            print(f"❌ Error en {t}: {e}")
+            print(f"❌ Error crítico procesando {t}: {e}")
 
-    # 3. BENCHMARKS
-    benchs = ['^GSPC', '^IPSA']
-    for b in benchs:
-        if b not in tickers:
-            _, h = smart_download(b)
-            if not h.empty:
-                h.index = pd.to_datetime(h.index).tz_localize(None)
-                d = h['Close'].reset_index()
-                d.columns = ['Date', 'Close']
-                d['Date'] = d['Date'].dt.strftime('%Y-%m-%d')
-                d['Ticker'] = b
-                d['Type'] = 'Benchmark'
-                d['SMA_20']=0;d['SMA_50']=0;d['SMA_200']=0;d['Metric_Revenue']=0;d['Metric_NetIncome']=0
-                history_data.extend(d.to_dict('records'))
+    return snapshot, history
 
-    return snapshot_data, history_data
+# ==========================================
+# 4. CAPA DE TRANSFORMACIÓN Y CARGA (SPARK ETL)
+# ==========================================
 
 def run_etl():
+    """Función orquestadora del ETL."""
     spark = init_spark()
-    tickers = ['AAPL', 'MSFT', 'NVDA', 'SQM-B.SN', 'BSANTANDER.SN', '^IPSA', '^GSPC']
-    snap, hist = get_data_institutional(tickers)
-    macro = get_macro_real()
-    pd.DataFrame(snap).to_csv("data_kpi.csv", index=False)
-    pd.DataFrame(hist).to_csv("data_history.csv", index=False)
-    macro.to_csv("data_macro.csv", index=False)
-    print("💾 Datos V60 (Final Fix) Generados.")
+    api_key = get_api_key()
+
+    # 1. Ejecución de lógica de extracción
+    raw_macro = get_macro_data(api_key)
+    raw_snapshot, raw_history = get_financial_data(TARGET_TICKERS)
+
+    print("\n⚡ Iniciando Procesamiento en PySpark...")
+
+    # --- A. PROCESAR HISTORIA (Large Dataset) ---
+    # Esquema explícito para garantizar integridad de tipos
+    schema_hist = StructType([
+        StructField("Ticker", StringType(), False),
+        StructField("Date", StringType(), False),
+        StructField("Type", StringType(), False),
+        StructField("Close", DoubleType(), True),
+        StructField("SMA_20", DoubleType(), True),
+        StructField("SMA_50", DoubleType(), True),
+        StructField("SMA_200", DoubleType(), True),
+        StructField("Metric_Revenue", DoubleType(), True),
+        StructField("Metric_NetIncome", DoubleType(), True)
+    ])
+
+    df_hist_spark = spark.createDataFrame(raw_history, schema=schema_hist)
+
+    # Transformación: Casting y limpieza de nulos
+    df_hist_final = df_hist_spark \
+        .withColumn("Close",  (col("Close").cast("double"))) \
+        .fillna(0, subset=["Metric_Revenue", "Metric_NetIncome"])
+
+    # --- B. PROCESAR KPIS (Snapshot) ---
+    df_kpi_spark = spark.createDataFrame(raw_snapshot)
+    
+    # Transformación: Columna derivada condicional (Ejemplo de lógica Spark)
+    df_kpi_final = df_kpi_spark \
+        .withColumn("Estado_YTD", when(col("Perf_YTD") > 0, "Positivo").otherwise("Negativo"))
+
+    # --- C. PROCESAR MACRO ---
+    df_macro_spark = spark.createDataFrame(raw_macro)
+
+    # --- LOAD: PUBLICACIÓN DE DATOS ESTÁTICOS ---
+    print("💾 Guardando archivos CSV (Static Data Publishing)...")
+    
+    # Nota: Usamos toPandas().to_csv() porque Streamlit lee CSV localmente.
+    # En un entorno real Big Data, esto sería df.write.parquet("s3://...")
+    df_kpi_final.toPandas().to_csv("data_kpi.csv", index=False)
+    df_hist_final.toPandas().to_csv("data_history.csv", index=False)
+    df_macro_spark.toPandas().to_csv("data_macro.csv", index=False)
+
+    print("✅ ETL Finalizado Correctamente.")
+    spark.stop()
 
 if __name__ == "__main__":
     run_etl()
