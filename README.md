@@ -1,4 +1,4 @@
-# Terminal Inversionista: Plataforma de Analítica Institucional
+# Terminal Inversionista: Plataforma de Análisis de Indicadores
 
 ![Build Status](https://github.com/nicolasbobadillat/Indicadores/actions/workflows/daily_update.yml/badge.svg)
 ![Python](https://img.shields.io/badge/Python-3.10-blue.svg)
@@ -6,45 +6,55 @@
 ![Streamlit](https://img.shields.io/badge/Frontend-Streamlit-red.svg)
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://indicadores-nfhczfntub2eaywlowyxf9.streamlit.app/)
 
-**Terminal Inversionista v2.0** es un dashboard financiero de alto rendimiento diseñado para replicar la densidad de información y la utilidad de las terminales institucionales (ej. Bloomberg). A diferencia de los dashboards estándar, este proyecto implementa una **arquitectura desacoplada tipo Serverless Data Lakehouse**, separando el procesamiento pesado de datos de la interfaz de usuario para garantizar una latencia inferior al segundo.
+<!-- PORTADA VISUAL -->
+<div align="center">
+  <img src="media/dashvoard_v2_dark.png" alt="Terminal Inversionista Dark Mode" width="100%" style="border-radius: 10px; box-shadow: 0px 4px 15px rgba(0,0,0,0.5);">
+  <br>
+  <em>Vista de Analítica Institucional (Modo Oscuro) - Análisis en Tiempo Real</em>
+  <br><br>
+  <h3> Demo en Vivo</h3>
+  <img src="media/DashboardIndicadores.gif" alt="Funcionamiento en Vivo" width="100%" style="border-radius: 10px;">
+  <br>
+</div>
+<!-- FIN PORTADA -->
 
-## 🏗 Arquitectura del Sistema
 
-La solución sigue un patrón estricto de **Extracción, Transformación y Carga (ETL)** orquestado vía CI/CD, demostrando preparación para escalabilidad:
+
+**Terminal Inversionista v2.0** es un dashboard financiero diseñado para centralizar métricas clave en una interfaz limpia. Para lograr costo cero y mantenimiento mínimo, implementé una arquitectura serverless donde GitHub actúa como orquestador y capa de almacenamiento, eliminando la necesidad de servidores dedicados.
+
+## Arquitectura del Sistema
+
+La solución sigue un patrón estricto de **Extracción, Transformación y Carga (ETL)** orquestado vía CI/CD.
 
 ```mermaid
 graph LR
-    A[APIs Externas] -->|Datos Crudos| B(PySpark ETL);
-    B -->|Validación de Esquema| C{Transformación de Datos};
-    C -->|CSVs Optimizados| D[Capa de Datos Estática];
-    D -->|Solo Lectura| E[Frontend Streamlit];
+    A[Jupyter/Colab Prototyping] -->|Refactorización| B(Script PySpark);
+    B -->|Orquestación| C[GitHub Actions];
+    C -->|Datos Procesados| D[Repositorio (Data Layer)];
+    D -->|Lectura| E[Frontend Streamlit];
     F[GitHub Actions] -->|Trigger Diario| B;
 ```
-### 1. Capa de Extracción (Ingesta)
-- **Fuentes:** Integración con Yahoo Finance (Renta Variable Global, Macro) y Mindicador (Indicadores Económicos de Chile).
-- **Estrategia:** Implementación de recuperación *"Fast Info"* con algoritmos de redundancia (fallback) y proxies para minimizar la latencia de las APIs y asegurar la disponibilidad de índices locales (ej. IPSA).
+### 1. Desarrollo del ETL (De Notebook a Producción)
+- **Prototipado:** La lógica de extracción y transformación se desarrolló inicialmente en **Google Colab (Jupyter Notebooks)** para iteración rápida.
+- **Producción:** El código se consolidó en un script de Python estándar (`etl_spark.py`) para que pueda ejecutarse de forma autónoma.
+- **Motor:** Se utiliza **PySpark** con definiciones estrictas de esquema (`StructType`). Esto previene errores silenciosos en producción si las APIs cambian sus formatos de datos.
 
-### 2. Capa de Transformación (Apache Spark)
-- **Motor:** Se utiliza **PySpark** en lugar de Pandas para demostrar capacidades de Big Data y computación distribuida.
-- **Cumplimiento de Esquema:** Uso de definiciones `StructType` para imponer tipado estricto, previniendo fallos en producción causados por cambios inesperados en las APIs (Schema Drift).
-- **Lógica:** Cálculo de Medias Móviles (SMA 20/50/200) y crecimiento año contra año (YoY) mediante funciones de ventana optimizadas.
+### 2. Orquestación (GitHub Actions vs Airflow)
+- **Decisión de Técnica:** Para un pipeline batch de ejecución diaria, **Apache Airflow** resultaba sobredimensionado. Opté por **GitHub Actions** para mantener el código y la orquestación en el mismo lugar, aprovechando los runners gratuitos de GitHub para procesar los datos con PySpark sin infraestructura adicional.
 
 ### 3. Capa de Servicio (Frontend)
-- **Framework:** **Streamlit**, altamente customizado vía Inyección de CSS para lograr un diseño "Full Bleed" (borde a borde) y eliminar la apariencia estándar del framework.
-- **Gestión de Estado:** Implementación de `st.session_state` para persistir las preferencias del usuario (Watchlists, Modo Oscuro/Claro) durante la sesión.
+- **Framework:** **Streamlit**, altamente customizado vía **Inyección de CSS** para maximizar el espacio de visualización.
 - **Visualización:** Gráficos **Plotly** interactivos que incluyen análisis comparativo de doble eje, gráficos de cascada (Waterfall) para estructuras de P&L, y medidores (Gauges) para análisis de sentimiento.
 
 ---
 
-## 🚀 Características Técnicas Clave
+## Características Técnicas Clave
 
-### Pipeline CI/CD Automatizado
-El proyecto se ejecuta bajo un esquema de **Cron Serverless** utilizando GitHub Actions.
-- **Workflow:** Ejecución diaria automática (23:00 UTC) al cierre de mercado.
-- **Auto-Healing:** El pipeline realiza commits automáticos de los nuevos datasets procesados al repositorio, actuando como una base de datos auto-actualizable sin servidores dedicados.
-
-### UI/UX de "Grado Institucional"
+### Actualización Automática de Datos
+- **Persistencia de Datos**: En lugar de gestionar una base de datos externa, el sistema utiliza el propio repositorio para almacenar el histórico procesado. El bot realiza un commit automático tras el ETL, lo que dispara el re-despliegue inmediato en Streamlit.
+- **Workflow:** Todos los días a las 23:00 UTC, el bot ejecuta el ETL.
+### UI/UX
 - **Watchlist Dinámica:** Los usuarios pueden agregar/eliminar activos en tiempo real.
-- **Sistema de Temas:** Alternancia entre "Bloomberg Dark Mode" y "Standard Light Mode".
-- **Cinta de Tickers (Tape):** Animación CSS pura para visualizar el sentimiento del mercado de un vistazo.
-- **Análisis de Puente (Bridge):** Visualización automática de la estructura de resultados (Ingresos -> Costos -> Utilidad Bruta -> Utilidad Neta).
+- **Cinta de Tickers:** Animación CSS pura para visualizar el sentimiento de mercado.
+- **Sistema de Temas:** Alternancia entre "Dark Mode" y "Light Mode".
+- **Análisis Estructural:** Visualización tipo "Bridge" para entender la composición de resultados financieros.
