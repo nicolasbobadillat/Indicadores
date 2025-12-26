@@ -28,12 +28,13 @@ La solución sigue un patrón estricto de **Extracción, Transformación y Carga
 
 ```mermaid
 graph LR
-    A[Jupyter/Colab Prototyping] -->|Refactorización| B(Script PySpark);
-    B -->|Orquestación| C[GitHub Actions];
-    C -->|Datos Procesados| D[Repositorio (Data Layer)];
-    D -->|Lectura| E[Frontend Streamlit];
-    F[GitHub Actions] -->|Trigger Diario| B;
+    A[Jupyter Notebook] -->|Refactor a .py| B(Script PySpark)
+    C[GitHub Actions/Cron] -->|Ejecuta 23:00 UTC| B
+    B -->|Commit & Push| D[(Repositorio)]
+    D -->|Lectura| E[Streamlit App]
+    
 ```
+
 ### 1. Desarrollo del ETL (De Notebook a Producción)
 - **Prototipado:** La lógica de extracción y transformación se desarrolló inicialmente en **Google Colab (Jupyter Notebooks)** para iteración rápida.
 - **Producción:** El código se consolidó en un script de Python estándar (`etl_spark.py`) para que pueda ejecutarse de forma autónoma.
