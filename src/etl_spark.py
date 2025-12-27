@@ -74,13 +74,15 @@ def init_spark() -> SparkSession:
         .master("local[*]") \
         .getOrCreate()
 
-def get_api_key() -> str:
-    """Recupera la API Key de variables de entorno o usa fallback."""
-    key = os.environ.get('RAPIDAPI_KEY')
-    if not key:
-        print("⚠️ AVISO: Usando API Key de respaldo (Entorno Local).")
-        return DEFAULT_API_KEY
-    return key
+def get_api_key():
+    # Busca la variable de entorno que definimos en el YAML
+    api_key = os.getenv("FMP_API_KEY") 
+    
+    # Si no la encuentra, lanza un error claro en lugar de buscar DEFAULT_API_KEY
+    if not api_key:
+        raise ValueError("❌ ERROR FATAL: No se encontró la API Key en las variables de entorno (GitHub Secrets).")
+    
+    return api_key
 
 # ==========================================
 # 3. CAPA DE EXTRACCIÓN (EXTRACT)
