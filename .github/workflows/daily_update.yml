@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pyspark pandas
+          pip install requests pyspark pandas yfinance
       
       # E. EJECUTAR EL ETL SPARk
       - name: Run PySpark ETL
