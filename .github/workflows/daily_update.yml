@@ -40,7 +40,7 @@ jobs:
           # IZQUIERDA: Nombre que busca Python (os.getenv)
           # DERECHA: Nombre del secreto que acabas de crear en GitHub
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }} 
-        run: python src/etl_spark.py
+        
 
       - name: Install dependencies
         run: |
