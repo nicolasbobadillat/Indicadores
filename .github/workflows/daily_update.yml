@@ -35,9 +35,12 @@ jobs:
           python-version: '3.10' 
 
       # D. Instalar Librerías
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+      - name: Run PySpark ETL
+        env: 
+          # IZQUIERDA: Nombre que busca Python (os.getenv)
+          # DERECHA: Nombre del secreto que acabas de crear en GitHub
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }} 
+        run: python src/etl_spark.py
 
       # E. EJECUTAR EL ETL SPARk
       - name: Run PySpark ETL
